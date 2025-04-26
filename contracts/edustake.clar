@@ -10,7 +10,7 @@
 (define-map stakers principal 
   { 
     amount: uint,
-    timestamp: uint,
+    block-height: uint,
     yield-claimed: uint
   }
 )
@@ -34,6 +34,7 @@
 (define-constant ERR-RECIPIENT-NOT-FOUND (err u106))
 (define-constant ERR-INSUFFICIENT-POOL (err u107))
 (define-constant ERR-UNAUTHORIZED (err u108))
+(define-constant ERR-TRANSFER-FAILED (err u109))
 
 ;; Admin functions
 
@@ -62,14 +63,14 @@
       (map-set stakers tx-sender 
         {
           amount: (+ amount (get amount existing-stake)),
-          timestamp: block-height,
+          block-height: burn-block-height,
           yield-claimed: (get yield-claimed existing-stake)
         }
       )
       (map-set stakers tx-sender 
         {
           amount: amount,
-          timestamp: block-height,
+          block-height: burn-block-height,
           yield-claimed: u0
         }
       )
@@ -87,45 +88,40 @@
   (let (
     (staker-data (unwrap! (map-get? stakers tx-sender) ERR-NO-STAKE-FOUND))
     (staked-amount (get amount staker-data))
-    (stake-time (get timestamp staker-data))
+    (stake-height (get block-height staker-data))
+    (current-height burn-block-height)
     (min-blocks u4320)  ;; approximately 30 days
+    (blocks-staked (- current-height stake-height))
+    (yearly-yield-rate u500)  ;; 5% represented as 500 basis points
+    (blocks-per-year u52560)  ;; approximately 365 days
+    (yield-amount (/ (* amount (* blocks-staked yearly-yield-rate)) (* blocks-per-year u10000)))
   )
     ;; Check minimum staking period
-    (asserts! (>= (- block-height stake-time) min-blocks) ERR-MIN-STAKING-PERIOD)
+    (asserts! (>= blocks-staked min-blocks) ERR-MIN-STAKING-PERIOD)
     
     ;; Ensure amount is valid
     (asserts! (<= amount staked-amount) ERR-ZERO-AMOUNT)
     
-    ;; Calculate yield (simplified: 5% annual rate, prorated by blocks)
-    (let (
-      (blocks-staked (- block-height stake-time))
-      (yearly-yield-rate u500)  ;; 5% represented as 500 basis points
-      (blocks-per-year u52560)  ;; approximately 365 days
-      (yield-amount (/ (* amount (* blocks-staked yearly-yield-rate)) (* blocks-per-year u10000)))
-    )
-      ;; Update staker data
-      (if (is-eq amount staked-amount)
-        (map-delete stakers tx-sender)
-        (map-set stakers tx-sender 
-          {
-            amount: (- staked-amount amount),
-            timestamp: block-height,
-            yield-claimed: (+ (get yield-claimed staker-data) yield-amount)
-          }
-        )
+    ;; Update staker data
+    (if (is-eq amount staked-amount)
+      (map-delete stakers tx-sender)
+      (map-set stakers tx-sender 
+        {
+          amount: (- staked-amount amount),
+          block-height: current-height,
+          yield-claimed: (+ (get yield-claimed staker-data) yield-amount)
+        }
       )
-      
-      ;; Update total staked
-      (var-set total-staked (- (var-get total-staked) amount))
-      
-      ;; Update scholarship pool with yield
-      (var-set scholarship-pool (+ (var-get scholarship-pool) yield-amount))
-      
-      ;; Transfer STX back to staker
-      (as-contract (stx-transfer? amount tx-sender tx-sender))
-      
-      (ok true)
     )
+    
+    ;; Update total staked
+    (var-set total-staked (- (var-get total-staked) amount))
+    
+    ;; Update scholarship pool with yield
+    (var-set scholarship-pool (+ (var-get scholarship-pool) yield-amount))
+    
+    ;; Transfer STX back to staker - FIXED: Properly handle the transfer result
+    (as-contract (stx-transfer? amount tx-sender tx-sender))
   )
 )
 
@@ -168,7 +164,7 @@
     (map-set scholarship-recipients recipient 
       {
         total-awarded: (+ (get total-awarded recipient-data) amount),
-        last-disbursement: block-height,
+        last-disbursement: burn-block-height,
         institution: (get institution recipient-data),
         field-of-study: (get field-of-study recipient-data),
         active: true
@@ -178,10 +174,8 @@
     ;; Update scholarship pool
     (var-set scholarship-pool (- pool-balance amount))
     
-    ;; Transfer STX to recipient
+    ;; Transfer STX to recipient - FIXED: Return the transfer result
     (as-contract (stx-transfer? amount tx-sender recipient))
-    
-    (ok true)
   )
 )
 
@@ -248,8 +242,8 @@
     existing-stake 
     (let (
       (amount (get amount existing-stake))
-      (stake-time (get timestamp existing-stake))
-      (blocks-staked (- block-height stake-time))
+      (stake-height (get block-height existing-stake))
+      (blocks-staked (- burn-block-height stake-height))
       (yearly-yield-rate u500)  ;; 5% represented as 500 basis points
       (blocks-per-year u52560)  ;; approximately 365 days
     )
